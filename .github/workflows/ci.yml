@@ -16,7 +16,8 @@ jobs:
         run: make check
       - name: Check scripts and verifier
         run: |
-          bash -n scripts/build.sh scripts/proot-sphal-run scripts/proot-vulkan-x11-run
+          bash -n scripts/build.sh scripts/apply-termux-x11-patches.sh \
+            scripts/proot-sphal-run scripts/proot-vulkan-x11-run
           python3 -m py_compile packaging/verify_libhybris.py
           python3 -m json.tool build/source-lock.json >/dev/null
           python3 -m json.tool bridge/sysvk.json >/dev/null

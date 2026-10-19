@@ -12,6 +12,12 @@ The build fetches pinned revisions of:
 Their licenses remain applicable to the resulting sources, binaries and
 headers. Exact revisions are recorded in `build/source-lock.json`.
 
+The initial SPHAL loader, Vulkan dispatch, and X11 AHardwareBuffer reference
+implementations shared for this bring-up were written by
+[ZenFox3](https://github.com/ZenFox3). The production code in this repository
+was subsequently split across pinned libhybris, sysvk, Khronos Loader, and
+xMeM WSI components, but retains that work's architectural contribution.
+
 The raw AArch64 thread-pointer patch is adapted from work by Nikita Ukhrenkov
 and Sophie Winter in the wmww/libhybris fork:
 

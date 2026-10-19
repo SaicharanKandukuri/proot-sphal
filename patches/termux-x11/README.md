@@ -4,6 +4,13 @@ The AHardwareBuffer WSI and the X server form one private protocol revision.
 Apply these patches in numeric order to Termux:X11 commit
 `0cb0203c283bfafbad380b90444296aa42af058d`.
 
+For a clean checkout, the repository helper validates the pinned revision and
+applies every patch at its correct nested repository root:
+
+```sh
+./scripts/apply-termux-x11-patches.sh /path/to/termux-x11
+```
+
 Patch roots differ because Xorg is a nested source repository:
 
 ```sh
