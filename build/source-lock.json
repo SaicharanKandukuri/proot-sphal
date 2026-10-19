@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "target": "linux-aarch64-glibc-on-android",
+  "sources": {
+    "libhybris": {
+      "url": "https://github.com/libhybris/libhybris.git",
+      "revision": "7079712a42ea2754adf747e70c6cc75764c8596e"
+    },
+    "android_headers": {
+      "url": "https://github.com/Linux-on-droid/android-headers-30.git",
+      "revision": "a6261c5cce8e945868b68318e867e382dea4bffd"
+    }
+  }
+}

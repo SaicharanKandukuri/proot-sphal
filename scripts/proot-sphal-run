@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+usage()
+{
+    cat >&2 <<'EOF'
+Usage: proot-sphal-run /vendor/or/odm/library.so COMMAND [ARG...]
+
+Run a glibc PRoot command with the Android SPHAL bridge initialized before
+main(). Android system partitions and /linkerconfig/ld.config.txt must already
+be visible inside the PRoot guest.
+EOF
+}
+
+[ "$#" -ge 2 ] || { usage; exit 2; }
+
+sphal=$1
+shift
+case "$sphal" in
+    /vendor/*|/odm/*) ;;
+    *) printf 'proot-sphal-run: SPHAL must be under /vendor or /odm\n' >&2; exit 2 ;;
+esac
+case "/$sphal/" in
+    */../*) printf "proot-sphal-run: '..' path segments are not allowed\n" >&2; exit 2 ;;
+esac
+
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
+bridge=$root/lib
+
+export LD_PRELOAD=$bridge/libhybris-common.so.1${LD_PRELOAD:+:$LD_PRELOAD}
+export LD_LIBRARY_PATH=$bridge${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export HYBRIS_TLS_PRELOAD=$sphal
+export HYBRIS_FORCE_LEGACY_PROPERTY_HOOKS=${HYBRIS_FORCE_LEGACY_PROPERTY_HOOKS:-1}
+export HYBRIS_SKIP_BIONIC_PROPERTY_INIT=${HYBRIS_SKIP_BIONIC_PROPERTY_INIT:-1}
+export HYBRIS_PTHREAD_RAW_EXIT=${HYBRIS_PTHREAD_RAW_EXIT:-1}
+export HYBRIS_LINKER_DIR=$bridge/libhybris/linker
+export HYBRIS_LD_LIBRARY_PATH=${HYBRIS_LD_LIBRARY_PATH:-$bridge/bionic:/system/lib64:/system_ext/lib64:/product/lib64:/vendor/lib64:/vendor/lib64/egl:/vendor/lib64/hw:/odm/lib64:/apex/com.android.runtime/lib64/bionic:/apex/com.android.i18n/lib64:/apex/com.android.tethering/lib64}
+
+export ANDROID_ROOT=${ANDROID_ROOT:-/system}
+export ANDROID_DATA=${ANDROID_DATA:-/data}
+export ANDROID_RUNTIME_ROOT=${ANDROID_RUNTIME_ROOT-}
+export ANDROID_ART_ROOT=${ANDROID_ART_ROOT:-/apex/com.android.art}
+export ANDROID_I18N_ROOT=${ANDROID_I18N_ROOT:-/apex/com.android.i18n}
+export ANDROID_TZDATA_ROOT=${ANDROID_TZDATA_ROOT:-/apex/com.android.tzdata}
+
+exec "$@"
