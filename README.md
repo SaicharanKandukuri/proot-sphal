@@ -25,23 +25,59 @@ successful `main` build:
 
 Open the latest successful [Artifacts workflow](../../actions/workflows/artifacts.yml),
 download both artifact archives, and verify each adjacent `SHA256SUMS` file.
-Install the Android and Termux pieces with:
+On a computer with ADB, install the Android app and copy the matching companion
+and guest archive into Termux's external-files directory:
 
 ```sh
 adb install -r termux-x11-proot-sphal-debug.apk
-apt install ./termux-x11-nightly-*-all.deb
+adb push termux-x11-nightly-*-all.deb \
+  /sdcard/Android/data/com.termux/files/
+adb push proot-sphal-aarch64.tar.xz \
+  /sdcard/Android/data/com.termux/files/
 ```
 
-Extract the guest archive into the Linux rootfs, or bind its `opt/proot-sphal`
-directory at `/opt/proot-sphal`:
+Then, in Termux, install the companion from the same workflow run. The explicit
+downgrade permission is necessary when a newer upstream nightly is installed:
 
 ```sh
-tar -xJf proot-sphal-aarch64.tar.xz -C ROOTFS
+apt install -y --allow-downgrades \
+  /sdcard/Android/data/com.termux/files/termux-x11-nightly-*-all.deb
+cp /sdcard/Android/data/com.termux/files/proot-sphal-aarch64.tar.xz "$HOME/"
 ```
 
 The APK and companion package must come from the same workflow run. uDroid's
 embedded display server needs the same patches but does not use this standalone
 APK.
+
+### Termux PRoot-Distro smoke test
+
+The following sequence was validated on a Pixel 6a with Android 17 and a clean
+Ubuntu PRoot-Distro container. Start the patched server, then share Termux's
+temporary directory and home directory with the guest:
+
+```sh
+termux-x11 :0 &
+proot-distro login --shared-tmp \
+  --bind "$HOME:/mnt/termux-home" ubuntu
+```
+
+Inside the Ubuntu guest, install the WSI runtime dependencies, extract the
+runtime, and run the packaged presentation gate:
+
+```sh
+apt-get update
+apt-get install -y \
+  libxcb1 libxcb-present0 libxcb-dri3-0 libxcb-sync1 libx11-xcb1 libstdc++6
+tar -xJf /mnt/termux-home/proot-sphal-aarch64.tar.xz -C /
+
+DISPLAY=:0 /opt/proot-sphal/bin/proot-vulkan-x11-run \
+  /vendor/lib64/hw/vulkan.mali.so \
+  /opt/proot-sphal/libexec/vulkan-xcb-present --frames 120
+```
+
+A passing run ends with `PASS stage=present` and `PASS stage=clean-exit`.
+The HAL filename is device-specific; select the Vulkan module present under
+`/vendor/lib64/hw/` rather than assuming `vulkan.mali.so` on every device.
 
 ## Build
 
