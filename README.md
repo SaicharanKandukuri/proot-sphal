@@ -14,8 +14,8 @@ for upstream and adapted-work attribution.
 
 ## Prebuilt test stack
 
-The **Artifacts** workflow publishes a protocol-matched test stack from every
-successful `main` build:
+The **Artifacts** workflow publishes a protocol-matched test stack from
+successful `main` source builds and manual runs:
 
 - `proot-sphal-aarch64.tar.xz`: guest runtime installed at `/opt/proot-sphal`.
 - `termux-x11-proot-sphal-debug.apk`: patched display server, signed with the

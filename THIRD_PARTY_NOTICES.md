@@ -30,4 +30,6 @@ See the source repositories and patch headers for copyright and license details.
 The paired server patch set targets
 [Termux:X11](https://github.com/termux/termux-x11), which is GPL-3.0 licensed.
 Redistributors of a combined Termux:X11 binary must meet its corresponding
-source and license obligations. This repository does not bundle that binary.
+source and license obligations. CI publishes the binary separately from the
+source tree together with the exact patch set; its corresponding source is the
+pinned upstream revision plus those patches.
