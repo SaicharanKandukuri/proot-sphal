@@ -203,6 +203,10 @@ docker run --rm --platform linux/arm64 \
             "$source_dir/VkLayer_window_system_integration.json" \
             "$target_dir/VkLayer_window_system_integration.json"
 
+        install -d "$prefix/share/vulkan/icd.d"
+        install -m 0644 /repo/bridge/sysvk.json \
+            "$prefix/share/vulkan/icd.d/sysvk.json"
+
         install -d "$prefix/libexec"
         cc -std=c11 -O2 -g0 -ffile-prefix-map=/work=. \
             -I/work/src/vulkan_headers/include \
@@ -231,10 +235,6 @@ docker run --rm --platform linux/arm64 \
             done <<<"$dynamic"
         done < <(find "$prefix" -type f -print0)
     '
-
-install -d "$output/stage/opt/proot-sphal/share/vulkan/icd.d"
-install -m 0644 "$repo_root/bridge/sysvk.json" \
-    "$output/stage/opt/proot-sphal/share/vulkan/icd.d/sysvk.json"
 
 python3 "$repo_root/packaging/verify_libhybris.py" \
     "$output/stage/opt/proot-sphal/lib/libhybris-common.so.1"
