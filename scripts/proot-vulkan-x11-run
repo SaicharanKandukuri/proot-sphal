@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+usage()
+{
+    cat >&2 <<'EOF'
+Usage: proot-vulkan-x11-run /vendor/or/odm/vulkan.HAL.so COMMAND [ARG...]
+
+Run an X11 Vulkan command through Android's vendor Vulkan HAL, sysvk and the
+paired AHardwareBuffer WSI. DISPLAY and the patched Termux:X11 server must
+already be available inside the PRoot guest.
+EOF
+}
+
+[ "$#" -ge 2 ] || { usage; exit 2; }
+
+hal=$1
+shift
+case "$hal" in
+    /vendor/*|/odm/*) ;;
+    *) printf 'proot-vulkan-x11-run: HAL must be under /vendor or /odm\n' >&2; exit 2 ;;
+esac
+case "/$hal/" in
+    */../*) printf "proot-vulkan-x11-run: '..' path segments are not allowed\n" >&2; exit 2 ;;
+esac
+[ -n "${DISPLAY:-}" ] || {
+    printf 'proot-vulkan-x11-run: DISPLAY is not set\n' >&2
+    exit 2
+}
+
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
+lib=$root/lib
+vulkan=$lib/vulkan
+icd=$root/share/vulkan/icd.d/sysvk.json
+layers=$root/share/vulkan/explicit_layer.d
+
+export LD_PRELOAD=$lib/libhybris-common.so.1:$vulkan/libahb-wrapper.so${LD_PRELOAD:+:$LD_PRELOAD}
+export LD_LIBRARY_PATH=$vulkan:$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export HYBRIS_TLS_PRELOAD=$hal
+export UDROID_VULKAN_HAL=$hal
+export HYBRIS_FORCE_LEGACY_PROPERTY_HOOKS=${HYBRIS_FORCE_LEGACY_PROPERTY_HOOKS:-1}
+export HYBRIS_SKIP_BIONIC_PROPERTY_INIT=${HYBRIS_SKIP_BIONIC_PROPERTY_INIT:-1}
+export HYBRIS_PTHREAD_RAW_EXIT=${HYBRIS_PTHREAD_RAW_EXIT:-1}
+export HYBRIS_LINKER_DIR=$lib/libhybris/linker
+export HYBRIS_LD_LIBRARY_PATH=${HYBRIS_LD_LIBRARY_PATH:-$lib/bionic:/system/lib64:/system_ext/lib64:/product/lib64:/vendor/lib64:/vendor/lib64/egl:/vendor/lib64/hw:/odm/lib64:/apex/com.android.runtime/lib64/bionic:/apex/com.android.i18n/lib64:/apex/com.android.tethering/lib64}
+
+export ANDROID_ROOT=${ANDROID_ROOT:-/system}
+export ANDROID_DATA=${ANDROID_DATA:-/data}
+export ANDROID_RUNTIME_ROOT=${ANDROID_RUNTIME_ROOT-}
+export ANDROID_ART_ROOT=${ANDROID_ART_ROOT:-/apex/com.android.art}
+export ANDROID_I18N_ROOT=${ANDROID_I18N_ROOT:-/apex/com.android.i18n}
+export ANDROID_TZDATA_ROOT=${ANDROID_TZDATA_ROOT:-/apex/com.android.tzdata}
+
+export VK_DRIVER_FILES=$icd
+export VK_ICD_FILENAMES=$icd
+export VK_LAYER_PATH=$layers
+export VK_INSTANCE_LAYERS=VK_LAYER_window_system_integration
+export VK_LOADER_DEBUG=${VK_LOADER_DEBUG:-warn,error}
+export WSI_X11_AHB=${WSI_X11_AHB:-1}
+export WSI_X11_PRIVATE_CONNECTION=${WSI_X11_PRIVATE_CONNECTION:-1}
+export NODEVICE_SELECT=${NODEVICE_SELECT:-1}
+
+exec "$@"

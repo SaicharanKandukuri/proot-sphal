@@ -16,5 +16,14 @@ jobs:
         run: make check
       - name: Check scripts and verifier
         run: |
-          bash -n scripts/build.sh scripts/proot-sphal-run
+          bash -n scripts/build.sh scripts/proot-sphal-run scripts/proot-vulkan-x11-run
           python3 -m py_compile packaging/verify_libhybris.py
+          python3 -m json.tool build/source-lock.json >/dev/null
+          python3 -m json.tool bridge/sysvk.json >/dev/null
+      - name: Check canonical patch inventory
+        run: |
+          test "$(find patches/libhybris -name '*.patch' | wc -l)" -eq 4
+          test "$(find patches/sysvk -name '*.patch' | wc -l)" -eq 1
+          test "$(find patches/xmem-wsi -name '*.patch' | wc -l)" -eq 8
+          test "$(find patches/termux-x11 -name '*.patch' | wc -l)" -eq 6
+          git diff --check

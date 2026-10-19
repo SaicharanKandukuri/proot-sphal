@@ -1,0 +1,543 @@
+From: uDroid graphics runtime
+Subject: [PATCH] X11 WSI: make AHB allocation and teardown portable
+
+Make Android headers an explicit build input rather than linking libandroid,
+fix portable C++ initialization/includes, and advertise only exportable
+AHardwareBuffer surface formats. Preserve the application-selected format from
+surface enumeration through image creation, allocation, and DRI3 transport.
+Create each swapchain image exactly once so deferred allocation keeps the
+application-visible VkImage handle stable. Select memory using the image's real
+requirements, preserve sRGB semantics, initialize cleanup state, and wake the
+Present event thread during teardown. Bound the private AHardwareBuffer socket
+handshake so a dead or mismatched X server cannot freeze the producer. Accept
+readable final messages that arrive together with POLLHUP. Private DRI3
+modifiers 1257 and 1255 tell the paired Termux:X11 server whether content is
+RGBA or BGRA.
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 96af204..3149dad 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -240,6 +240,11 @@ else()
+ endif()
+ 
+ # X11 WSI
++set(ANDROID_HEADERS_INCLUDE_DIR "" CACHE PATH
++   "Parent include directory containing android/hardware_buffer.h")
++if(BUILD_WSI_X11 AND ANDROID_HEADERS_INCLUDE_DIR STREQUAL "")
++   message(FATAL_ERROR "ANDROID_HEADERS_INCLUDE_DIR is required for X11 AHardwareBuffer WSI")
++endif()
+ if(BUILD_WSI_X11)
+    set(CMAKE_BUILD_TYPE "Debug")
+ 
+@@ -250,11 +255,12 @@ if(BUILD_WSI_X11)
+ 
+    target_include_directories(wsi_x11 PRIVATE
+       ${PROJECT_SOURCE_DIR}
++      ${ANDROID_HEADERS_INCLUDE_DIR}
+       ${VULKAN_CXX_INCLUDE}
+       ${CMAKE_CURRENT_BINARY_DIR})
+ 
+    target_compile_options(wsi_x11 INTERFACE "-DBUILD_WSI_X11=1")
+-   list(APPEND LINK_WSI_LIBS wsi_x11 xcb xcb-present xcb-xfixes xcb-dri3 X11-xcb android)
++   list(APPEND LINK_WSI_LIBS wsi_x11 xcb xcb-present xcb-xfixes xcb-dri3 X11-xcb)
+ else()
+    list(APPEND JSON_COMMANDS COMMAND sed -i '/VK_KHR_xcb_surface/d' ${CMAKE_CURRENT_BINARY_DIR}/VkLayer_window_system_integration.json)
+    list(APPEND JSON_COMMANDS COMMAND sed -i '/VK_KHR_xlib_surface/d' ${CMAKE_CURRENT_BINARY_DIR}/VkLayer_window_system_integration.json)
+diff --git a/util/custom_allocator.hpp b/util/custom_allocator.hpp
+index a34164a..64a8247 100644
+--- a/util/custom_allocator.hpp
++++ b/util/custom_allocator.hpp
+@@ -28,6 +28,7 @@
+ #include <string>
+ #include <cassert>
+ #include <memory>
++#include <stdexcept>
+ 
+ #include <vulkan/vulkan.h>
+ 
+diff --git a/wsi/x11/surface_properties.cpp b/wsi/x11/surface_properties.cpp
+index b27ea1d..bf8d793 100644
+--- a/wsi/x11/surface_properties.cpp
++++ b/wsi/x11/surface_properties.cpp
+@@ -34,6 +34,7 @@
+ #include <X11/Xlib-xcb.h>
+ #include <vulkan/vk_icd.h>
+ #include <vulkan/vulkan.h>
++#include <vulkan/vulkan_android.h>
+ #include <vulkan/vulkan_xcb.h>
+ #include <vulkan/vulkan_xlib.h>
+ #include <vulkan/vulkan_core.h>
+@@ -120,19 +121,53 @@ VkResult surface_properties::get_surface_capabilities(VkPhysicalDevice physical_
+    return VK_SUCCESS;
+ }
+ 
+-std::vector<VkFormat> support_formats{ VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM };
++static bool supports_ahb_surface_format(VkPhysicalDevice physical_device, VkFormat format)
++{
++   VkExternalImageFormatProperties external_properties = {};
++   external_properties.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES;
++
++   VkImageFormatProperties2 format_properties = {};
++   format_properties.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
++   format_properties.pNext = &external_properties;
++
++   VkPhysicalDeviceExternalImageFormatInfo external_info = {};
++   external_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO;
++   external_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
++
++   VkPhysicalDeviceImageFormatInfo2 format_info = {};
++   format_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
++   format_info.pNext = &external_info;
++   format_info.format = format;
++   format_info.type = VK_IMAGE_TYPE_2D;
++   format_info.tiling = VK_IMAGE_TILING_LINEAR;
++   format_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++
++   auto &instance_data = layer::instance_private_data::get(physical_device);
++   VkResult result = instance_data.disp.GetPhysicalDeviceImageFormatProperties2KHR(
++      physical_device, &format_info, &format_properties);
++   if (result != VK_SUCCESS)
++      return false;
++
++   return (external_properties.externalMemoryProperties.externalMemoryFeatures &
++           VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) != 0;
++}
++
++static constexpr std::array<VkFormat, 4> candidate_formats = {
++   VK_FORMAT_R8G8B8A8_UNORM,
++   VK_FORMAT_R8G8B8A8_SRGB,
++   VK_FORMAT_B8G8R8A8_UNORM,
++   VK_FORMAT_B8G8R8A8_SRGB,
++};
+ 
+ VkResult surface_properties::get_surface_formats(VkPhysicalDevice physical_device, uint32_t *surface_format_count,
+                                                  VkSurfaceFormatKHR *surface_formats,
+                                                  VkSurfaceFormat2KHR *extended_surface_formats)
+ {
+    std::vector<surface_format_properties> formats;
+-   for (auto &format : support_formats)
++   for (auto format : candidate_formats)
+    {
+-      if (format != VK_FORMAT_UNDEFINED)
+-      {
+-         formats.insert(formats.begin(), (surface_format_properties){ format });
+-      }
++      if (supports_ahb_surface_format(physical_device, format))
++         formats.emplace_back(format);
+    }
+    return surface_properties_formats_helper(formats.begin(), formats.end(), surface_format_count, surface_formats,
+                                             extended_surface_formats);
+@@ -284,8 +319,8 @@ CreateXlibSurfaceKHR(VkInstance instance, const VkXlibSurfaceCreateInfoKHR *pCre
+ {
+    const VkXcbSurfaceCreateInfoKHR CreateInfo = {
+       .sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
+-      .flags = 0,
+       .pNext = NULL,
++      .flags = 0,
+       .connection = XGetXCBConnection(pCreateInfo->dpy),
+       .window = static_cast<xcb_window_t>(pCreateInfo->window),
+    };
+diff --git a/wsi/x11/swapchain.cpp b/wsi/x11/swapchain.cpp
+index 89a6c2f..4eddd4c 100644
+--- a/wsi/x11/swapchain.cpp
++++ b/wsi/x11/swapchain.cpp
+@@ -29,6 +29,7 @@
+  */
+ 
+ #include <cassert>
++#include <cerrno>
+ #include <chrono>
+ #include <condition_variable>
+ #include <cstdint>
+@@ -38,11 +39,22 @@
+ 
+ #include <dlfcn.h>
+ #include <fcntl.h>
++#include <poll.h>
+ #include <sys/socket.h>
++#include <sys/time.h>
+ #include <unistd.h>
+ #include <util/timed_semaphore.hpp>
+ #include <vulkan/vulkan_core.h>
+ #include <vulkan/vulkan_android.h>
++#ifndef _Nullable
++#define _Nullable
++#endif
++#ifndef _Nonnull
++#define _Nonnull
++#endif
++#ifndef __INTRODUCED_IN
++#define __INTRODUCED_IN(api_level)
++#endif
+ #include <android/hardware_buffer.h>
+ 
+ #include <xcb/present.h>
+@@ -69,17 +81,35 @@ struct x11_image_data
+ {
+    /* Device memory backing the image. */
+    VkDeviceMemory memory{};
+-   VkSubresourceLayout layout;
++   VkSubresourceLayout layout{};
+ 
+    fence_sync present_fence;
+ 
+-   xcb_pixmap_t pixmap;
+-   AHardwareBuffer *ahb;
++   xcb_pixmap_t pixmap{};
++   AHardwareBuffer *ahb{};
+    std::vector<pending_completion> pending_completions;
+ };
+ 
+ #define X11_SWAPCHAIN_MAX_PENDING_COMPLETIONS 128
+ 
++static constexpr int AHB_HANDSHAKE_TIMEOUT_MS = 3000;
++
++static bool wait_for_socket_event(int fd, short events)
++{
++   pollfd descriptor = { fd, events, 0 };
++   int result;
++   do
++   {
++      result = poll(&descriptor, 1, AHB_HANDSHAKE_TIMEOUT_MS);
++   } while (result < 0 && errno == EINTR);
++
++   /* POLLIN and POLLHUP may arrive together when the peer writes its final
++    * protocol message and closes. Consume the requested event; the following
++    * read/recv validates whether data or only EOF remains. */
++   return result == 1 && (descriptor.revents & events) != 0 &&
++          (descriptor.revents & (POLLERR | POLLNVAL)) == 0;
++}
++
+ swapchain::swapchain(layer::device_private_data &dev_data, const VkAllocationCallbacks *pAllocator, surface *surface)
+    : wsi::swapchain_base(dev_data, pAllocator)
+    , m_connection(surface->get_connection())
+@@ -88,6 +118,8 @@ swapchain::swapchain(layer::device_private_data &dev_data, const VkAllocationCal
+    , m_send_sbc(0)
+    , m_target_msc(0)
+    , m_last_present_msc(0)
++   , m_ahb_image_format(VK_FORMAT_UNDEFINED)
++   , m_ahb_dri3_modifier(0)
+    , m_thread_status_lock()
+    , m_thread_status_cond()
+ {
+@@ -100,6 +132,11 @@ swapchain::~swapchain()
+    if (m_present_event_thread_run)
+    {
+       m_present_event_thread_run = false;
++      /* xcb_wait_for_special_event is not interrupted by the condition
++       * variable. Queue a Present MSC notification so the event thread can
++       * observe shutdown even when there are no more pixmap events. */
++      xcb_present_notify_msc(m_connection, m_window, static_cast<uint32_t>(++m_send_sbc), 0, 0, 0);
++      xcb_flush(m_connection);
+       m_thread_status_cond.notify_all();
+       thread_status_lock.unlock();
+ 
+@@ -119,24 +156,24 @@ swapchain::~swapchain()
+    teardown();
+ }
+ 
+-static uint32_t get_memory_type(VkPhysicalDeviceMemoryProperties2 memory_props, uint32_t req,
+-                                VkMemoryPropertyFlagBits req_prop)
++static uint32_t get_memory_type(const VkPhysicalDeviceMemoryProperties2 &memory_props, uint32_t type_bits,
++                                VkMemoryPropertyFlags required_properties)
+ {
+-   size_t mem_type_idx = 0;
+-   for (; mem_type_idx < 8 * sizeof(req); ++mem_type_idx)
++   const auto &properties = memory_props.memoryProperties;
++   for (uint32_t index = 0; index < properties.memoryTypeCount; ++index)
+    {
+-      if (req & (1u << mem_type_idx) && req_prop & (1u << mem_type_idx))
+-      {
+-         return mem_type_idx;
+-      }
+-
+-      if (req & (1u << mem_type_idx))
+-      {
+-         return mem_type_idx;
+-      }
++      if ((type_bits & (1u << index)) != 0 &&
++          (properties.memoryTypes[index].propertyFlags & required_properties) == required_properties)
++         return index;
+    }
+ 
+-   return -1;
++   /* Device-local memory is a preference for a presentation image, not a
++    * reason to reject an otherwise compatible external allocation. */
++   for (uint32_t index = 0; index < properties.memoryTypeCount; ++index)
++      if ((type_bits & (1u << index)) != 0)
++         return index;
++
++   return UINT32_MAX;
+ }
+ 
+ xcb_pixmap_t swapchain::create_pixmap(swapchain_image &image)
+@@ -144,27 +181,65 @@ xcb_pixmap_t swapchain::create_pixmap(swapchain_image &image)
+    auto data = reinterpret_cast<x11_image_data *>(image.data);
+ 
+    int fds[] = { -1, -1 };
+-   if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0)
++   if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds) < 0)
++      return 0;
++
++   const timeval socket_timeout = { AHB_HANDSHAKE_TIMEOUT_MS / 1000,
++                                    (AHB_HANDSHAKE_TIMEOUT_MS % 1000) * 1000 };
++   if (setsockopt(fds[0], SOL_SOCKET, SO_RCVTIMEO, &socket_timeout, sizeof(socket_timeout)) != 0 ||
++       setsockopt(fds[0], SOL_SOCKET, SO_SNDTIMEO, &socket_timeout, sizeof(socket_timeout)) != 0)
++   {
++      WSI_LOG_ERROR("Failed to configure AHardwareBuffer socket timeout: %s", strerror(errno));
++      close(fds[0]);
++      close(fds[1]);
+       return 0;
++   }
+ 
+    auto pixmap = xcb_generate_id(m_connection);
+    auto cookie = xcb_dri3_pixmap_from_buffers_checked(
+       m_connection, pixmap, m_window, 1, m_image_create_info.extent.width, m_image_create_info.extent.height,
+-      data->layout.rowPitch, data->layout.offset, 0, 0, 0, 0, 0, 0, 24, 32, 1255, &fds[1]);
++      data->layout.rowPitch, data->layout.offset, 0, 0, 0, 0, 0, 0, 24, 32, m_ahb_dri3_modifier, &fds[1]);
+    xcb_flush(m_connection);
+ 
+-   uint8_t buf = 0;
+-   read(fds[0], &buf, 1);
++   bool transport_ok = false;
++   uint8_t ack = 0;
++   if (!wait_for_socket_event(fds[0], POLLIN))
++   {
++      WSI_LOG_ERROR("Timed out waiting for the X11 AHardwareBuffer import acknowledgement");
++   }
++   else
++   {
++      ssize_t read_result;
++      do
++      {
++         read_result = read(fds[0], &ack, sizeof(ack));
++      } while (read_result < 0 && errno == EINTR);
+ 
+-   HardwareBuffer_sendHandleToUnixSocket(data->ahb, fds[0]);
++      if (read_result != sizeof(ack) || ack != 1)
++      {
++         WSI_LOG_ERROR("Invalid X11 AHardwareBuffer import acknowledgement");
++      }
++      else if (!wait_for_socket_event(fds[0], POLLOUT))
++      {
++         WSI_LOG_ERROR("Timed out waiting to send the AHardwareBuffer handle");
++      }
++      else
++      {
++         int send_result = HardwareBuffer_sendHandleToUnixSocket(data->ahb, fds[0]);
++         transport_ok = send_result == 0;
++         if (!transport_ok)
++            WSI_LOG_ERROR("Failed to send the AHardwareBuffer handle: %d", send_result);
++      }
++   }
+ 
+    close(fds[0]);
+ 
+    auto error = xcb_request_check(m_connection, cookie);
+-   if (error)
++   if (error || !transport_ok)
+    {
+-      free(error);
+-      return false;
++      if (error)
++         free(error);
++      return 0;
+    }
+ 
+    data->pixmap = pixmap;
+@@ -177,27 +252,20 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
+    VkExternalMemoryHandleTypeFlags handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+    const std::lock_guard<std::recursive_mutex> lock(m_image_status_mutex);
+ 
+-   m_image_create_info = image_create;
+-   m_image_create_info.tiling = VK_IMAGE_TILING_LINEAR;
+-   m_image_create_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+-
+-   VkExternalMemoryImageCreateInfo external_memory_image_create_info = {};
+-   external_memory_image_create_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+-   external_memory_image_create_info.pNext = m_image_create_info.pNext;
+-   external_memory_image_create_info.handleTypes = handleType;
+-   m_image_create_info.pNext = &external_memory_image_create_info;
++   if (image.image == VK_NULL_HANDLE)
++      return VK_ERROR_INITIALIZATION_FAILED;
+ 
+-   res = m_device_data.disp.CreateImage(m_device, &m_image_create_info, get_allocation_callbacks(), &image.image);
+-   if (res != VK_SUCCESS)
+-   {
+-      return res;
+-   }
++   VkMemoryRequirements memory_requirements{};
++   m_device_data.disp.GetImageMemoryRequirements(m_device, image.image, &memory_requirements);
+ 
+-   /* Find a memory type */
+-   size_t mem_type_idx = get_memory_type(m_memory_props, 0xFFFFFFFF, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+-   if (mem_type_idx < 0)
++   /* Select only from the memory types the created image actually supports. */
++   uint32_t mem_type_idx = get_memory_type(m_memory_props, memory_requirements.memoryTypeBits,
++                                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++   if (mem_type_idx == UINT32_MAX)
+    {
+       WSI_LOG_ERROR("required memory type not found");
++      m_device_data.disp.DestroyImage(m_device, image.image, get_allocation_callbacks());
++      image.image = VK_NULL_HANDLE;
+       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+ 
+@@ -213,7 +281,7 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
+    VkMemoryAllocateInfo memory_allocate_info = {};
+    memory_allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    memory_allocate_info.pNext = &export_memory_allocate_info;
+-   memory_allocate_info.allocationSize = 0;
++   memory_allocate_info.allocationSize = memory_requirements.size;
+    memory_allocate_info.memoryTypeIndex = mem_type_idx;
+ 
+    /* Create image_data */
+@@ -281,9 +349,54 @@ VkResult swapchain::allocate_and_bind_swapchain_image(VkImageCreateInfo image_cr
+ VkResult swapchain::create_swapchain_image(VkImageCreateInfo image_create_info, swapchain_image &image)
+ {
+    m_image_create_info = image_create_info;
++   m_image_create_info.tiling = VK_IMAGE_TILING_LINEAR;
++   m_image_create_info.format = m_ahb_image_format;
++
++   VkExternalMemoryImageCreateInfo external_memory_image_create_info = {};
++   external_memory_image_create_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
++   external_memory_image_create_info.pNext = m_image_create_info.pNext;
++   external_memory_image_create_info.handleTypes =
++      VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
++   m_image_create_info.pNext = &external_memory_image_create_info;
++
+    return m_device_data.disp.CreateImage(m_device, &m_image_create_info, get_allocation_callbacks(), &image.image);
+ }
+ 
++bool swapchain::supports_ahb_export(const VkImageCreateInfo &image_create_info, VkFormat format) const
++{
++   VkExternalImageFormatProperties external_properties = {};
++   external_properties.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES;
++
++   VkImageFormatProperties2 format_properties = {};
++   format_properties.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
++   format_properties.pNext = &external_properties;
++
++   VkPhysicalDeviceExternalImageFormatInfo external_info = {};
++   external_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO;
++   external_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
++
++   VkPhysicalDeviceImageFormatInfo2 format_info = {};
++   format_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
++   format_info.pNext = &external_info;
++   format_info.format = format;
++   format_info.type = image_create_info.imageType;
++   format_info.tiling = VK_IMAGE_TILING_LINEAR;
++   format_info.usage = image_create_info.usage;
++   format_info.flags = image_create_info.flags;
++
++   VkResult result = m_device_data.instance_data.disp.GetPhysicalDeviceImageFormatProperties2KHR(
++      m_device_data.physical_device, &format_info, &format_properties);
++   if (result != VK_SUCCESS)
++      return false;
++
++   const auto features = external_properties.externalMemoryProperties.externalMemoryFeatures;
++   return (features & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) != 0 &&
++          format_properties.imageFormatProperties.maxExtent.width >= image_create_info.extent.width &&
++          format_properties.imageFormatProperties.maxExtent.height >= image_create_info.extent.height &&
++          format_properties.imageFormatProperties.maxArrayLayers >= image_create_info.arrayLayers &&
++          (format_properties.imageFormatProperties.sampleCounts & image_create_info.samples) != 0;
++}
++
+ void swapchain::present_event_thread()
+ {
+    auto thread_status_lock = std::unique_lock<std::mutex>(m_thread_status_lock);
+@@ -564,6 +677,44 @@ VkResult swapchain::init_platform(VkDevice device, const VkSwapchainCreateInfoKH
+       return VK_ERROR_INITIALIZATION_FAILED;
+    }
+ 
++   VkImageCreateInfo format_probe = {};
++   format_probe.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++   format_probe.imageType = VK_IMAGE_TYPE_2D;
++   format_probe.extent = { swapchain_create_info->imageExtent.width, swapchain_create_info->imageExtent.height, 1 };
++   format_probe.mipLevels = 1;
++   format_probe.arrayLayers = swapchain_create_info->imageArrayLayers;
++   format_probe.samples = VK_SAMPLE_COUNT_1_BIT;
++   format_probe.tiling = VK_IMAGE_TILING_LINEAR;
++   format_probe.usage = swapchain_create_info->imageUsage;
++   format_probe.sharingMode = swapchain_create_info->imageSharingMode;
++
++   m_ahb_image_format = swapchain_create_info->imageFormat;
++   if (m_ahb_image_format == VK_FORMAT_R8G8B8A8_UNORM ||
++       m_ahb_image_format == VK_FORMAT_R8G8B8A8_SRGB)
++   {
++      m_ahb_dri3_modifier = 1257;
++   }
++   else if (m_ahb_image_format == VK_FORMAT_B8G8R8A8_UNORM ||
++            m_ahb_image_format == VK_FORMAT_B8G8R8A8_SRGB)
++   {
++      m_ahb_dri3_modifier = 1255;
++   }
++   else
++   {
++      WSI_LOG_ERROR("Unsupported AHardwareBuffer swapchain format %d", m_ahb_image_format);
++      return VK_ERROR_FORMAT_NOT_SUPPORTED;
++   }
++
++   if (!supports_ahb_export(format_probe, m_ahb_image_format))
++   {
++      WSI_LOG_ERROR("Swapchain format %d is not exportable as an AHardwareBuffer",
++                    m_ahb_image_format);
++      return VK_ERROR_FORMAT_NOT_SUPPORTED;
++   }
++
++   WSI_LOG_INFO("Selected AHardwareBuffer format %d and transport modifier %llu",
++                m_ahb_image_format, static_cast<unsigned long long>(m_ahb_dri3_modifier));
++
+    auto eid = xcb_generate_id(m_connection);
+    m_special_event = xcb_register_for_special_xge(m_connection, &xcb_present_id, eid, nullptr);
+    xcb_present_select_input(m_connection, eid, m_window,
+diff --git a/wsi/x11/swapchain.hpp b/wsi/x11/swapchain.hpp
+index 3bed48d..0ac0f38 100644
+--- a/wsi/x11/swapchain.hpp
++++ b/wsi/x11/swapchain.hpp
+@@ -31,6 +31,15 @@
+ #pragma once
+ 
+ #include "surface.hpp"
++#ifndef _Nullable
++#define _Nullable
++#endif
++#ifndef _Nonnull
++#define _Nonnull
++#endif
++#ifndef __INTRODUCED_IN
++#define __INTRODUCED_IN(api_level)
++#endif
+ #include <android/hardware_buffer.h>
+ #include <condition_variable>
+ #include <cstdint>
+@@ -38,7 +47,6 @@
+ #include <vulkan/vulkan.h>
+ #include <wsi/swapchain_base.hpp>
+ #include <xcb/xcb.h>
+-#include <xcb/shm.h>
+ #include <xcb/present.h>
+ #include <xcb/xproto.h>
+ 
+@@ -155,6 +163,8 @@ protected:
+    VkResult get_free_buffer(uint64_t *timeout) override;
+ 
+ private:
++   bool supports_ahb_export(const VkImageCreateInfo &image_create_info, VkFormat format) const;
++
+    xcb_connection_t *m_connection;
+    xcb_window_t m_window;
+ 
+@@ -162,6 +172,8 @@ private:
+    uint64_t m_send_sbc;
+    uint64_t m_target_msc;
+    uint64_t m_last_present_msc;
++   VkFormat m_ahb_image_format;
++   uint64_t m_ahb_dri3_modifier;
+ 
+    xcb_special_event_t *m_special_event;
+    VkPhysicalDeviceMemoryProperties2 m_memory_props;
+-- 
+2.50.1

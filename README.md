@@ -1,20 +1,12 @@
 # proot-sphal
 
-Load Android vendor same-process HALs from an AArch64 glibc PRoot process.
-The project packages a pinned, patched libhybris runtime and a small reusable
-loader API; it does not include a graphics driver or window-system bridge.
+Canonical source for running Android vendor Vulkan from an AArch64 glibc PRoot
+guest and presenting it through a paired Termux:X11 server.
 
-## Why this exists
-
-Android vendor libraries assume Bionic's linker namespaces and thread-control
-block layout. Calling them directly from glibc can corrupt glibc TLS. This
-runtime uses libhybris' embedded Android linker, reserves an isolated Bionic
-TLS region for every host thread, and redirects raw AArch64 `TPIDR_EL0` reads
-into that region.
-
-The initial target is Android Q or newer on AArch64. It has been exercised with
-the Mali Vulkan HAL on a Pixel 6a running Android 17; another SPHAL remains a
-separate device-compatibility test.
+It contains the complete reproducible path: patched libhybris, sysvk, the
+AHardwareBuffer wrapper, patched xMeM X11 WSI, paired Termux:X11 protocol
+patches, launchers, probes, and qualification notes. Proprietary vendor
+libraries are never bundled.
 
 ## Build
 
@@ -24,20 +16,20 @@ Docker with ARM64 emulation or an ARM64 Docker host is required.
 ./scripts/build.sh out
 ```
 
-The relocatable runtime is staged at `out/stage/opt/proot-sphal`. External
-sources are fetched at the exact revisions in `build/source-lock.json`, then
-the ordered patches under `patches/libhybris` are applied.
+The package is staged at `out/stage/opt/proot-sphal`. Every external source is
+fetched at the exact revision in `build/source-lock.json`; the build fails if
+any patch no longer applies or a required artifact is missing.
 
-For source-only checks on the loader API:
+For source-only checks of the reusable loader API:
 
 ```sh
 make check
 ```
 
-## PRoot setup
+## PRoot mounts
 
-Expose Android's runtime and vendor trees to the guest. At minimum, use the
-equivalent of:
+The guest needs Android's runtime/vendor trees, Linux pseudo-filesystems, the
+X socket, and this package. The equivalent minimum is:
 
 ```sh
 proot \
@@ -45,11 +37,12 @@ proot \
   -b /system -b /system_ext -b /product -b /vendor -b /odm -b /apex \
   -b /dev -b /proc -b /sys \
   -b /linkerconfig/ld.config.txt \
+  -b X11_RUNTIME/.X11-unix:/tmp/.X11-unix \
   -b "$PWD/out/stage/opt/proot-sphal:/opt/proot-sphal" \
   /bin/bash
 ```
 
-Then load and inspect a vendor module:
+Use the normal SPHAL launcher to inspect any supported vendor module:
 
 ```sh
 /opt/proot-sphal/bin/proot-sphal-run \
@@ -58,20 +51,36 @@ Then load and inspect a vendor module:
   /vendor/lib64/hw/vulkan.mali.so HMI
 ```
 
-Use `proot_sphal_open()` and `proot_sphal_symbol()` from
-`include/proot_sphal.h` to embed the loader. Always launch the consumer through
-`proot-sphal-run`: `libhybris-common.so.1` must enter the initial ELF load set
-so its static TLS reserve exists before `main()`.
+## Vulkan X11
+
+Start the paired patched Termux:X11 server, set `DISPLAY`, then run a Vulkan
+application through the complete stack:
+
+```sh
+DISPLAY=:0 /opt/proot-sphal/bin/proot-vulkan-x11-run \
+  /vendor/lib64/hw/vulkan.mali.so \
+  vkmark --present-mode fifo
+```
+
+Deterministic gates are packaged in `libexec`:
+
+```sh
+DISPLAY=:0 /opt/proot-sphal/bin/proot-vulkan-x11-run \
+  /vendor/lib64/hw/vulkan.mali.so \
+  /opt/proot-sphal/libexec/vulkan-thread-lifecycle 8 25
+
+DISPLAY=:0 /opt/proot-sphal/bin/proot-vulkan-x11-run \
+  /vendor/lib64/hw/vulkan.mali.so \
+  /opt/proot-sphal/libexec/vulkan-xcb-present --frames 60
+```
+
+Apply the server patches using [their pinned baseline and exact roots](patches/termux-x11/README.md).
+See [the architecture](docs/ARCHITECTURE.md) and [qualification gates](docs/QUALIFICATION.md).
 
 ## Boundaries
 
-- This is rootless userspace interop, not access to otherwise forbidden device
-  nodes or SELinux-restricted files.
-- Only `/vendor` and `/odm` root libraries are accepted by the public loader.
-- SPHAL loading does not provide Vulkan/GL dispatch, buffer allocation, WSI,
-  presentation, or synchronization by itself.
-- A vendor library and all of its dependencies must match the running Android
-  system. Do not redistribute proprietary vendor binaries.
-
-The raw thread-pointer patch retains links to its upstream authors and commits
-in both the patch header and [third-party notices](THIRD_PARTY_NOTICES.md).
+- Rootless interop cannot bypass SELinux or inaccessible device nodes.
+- Vendor libraries must match the running Android system.
+- The current package targets Android Q or newer on AArch64.
+- FIFO is the qualified presentation mode; MAILBOX is not yet implemented.
+- Do not redistribute proprietary Android vendor binaries.

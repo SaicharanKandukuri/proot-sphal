@@ -1,8 +1,16 @@
 # Third-party notices
 
-The build fetches pinned revisions of [libhybris](https://github.com/libhybris/libhybris)
-and [Linux-on-droid Android headers](https://github.com/Linux-on-droid/android-headers-30).
-Their licenses remain applicable to the resulting binaries and headers.
+The build fetches pinned revisions of:
+
+- [libhybris](https://github.com/libhybris/libhybris)
+- [Linux-on-droid Android headers](https://github.com/Linux-on-droid/android-headers-30)
+- [sysvk](https://github.com/xMeM/sysvk)
+- [xMeM Vulkan WSI layer](https://github.com/xMeM/vulkan-wsi-layer)
+- [Khronos Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers)
+- [Khronos Vulkan-Loader](https://github.com/KhronosGroup/Vulkan-Loader)
+
+Their licenses remain applicable to the resulting sources, binaries and
+headers. Exact revisions are recorded in `build/source-lock.json`.
 
 The raw AArch64 thread-pointer patch is adapted from work by Nikita Ukhrenkov
 and Sophie Winter in the wmww/libhybris fork:
@@ -12,3 +20,8 @@ and Sophie Winter in the wmww/libhybris fork:
 - [Thread-ID TLS shadow](https://github.com/wmww/libhybris/commit/a7674b19cbd52600e14c990d3897a692140db2ed)
 
 See the source repositories and patch headers for copyright and license details.
+
+The paired server patch set targets
+[Termux:X11](https://github.com/termux/termux-x11), which is GPL-3.0 licensed.
+Redistributors of a combined Termux:X11 binary must meet its corresponding
+source and license obligations. This repository does not bundle that binary.
