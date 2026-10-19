@@ -25,6 +25,6 @@ jobs:
         run: |
           test "$(find patches/libhybris -name '*.patch' | wc -l)" -eq 4
           test "$(find patches/sysvk -name '*.patch' | wc -l)" -eq 1
-          test "$(find patches/xmem-wsi -name '*.patch' | wc -l)" -eq 8
+          test "$(find patches/xmem-wsi -name '*.patch' | wc -l)" -eq 9
           test "$(find patches/termux-x11 -name '*.patch' | wc -l)" -eq 6
           git diff --check
